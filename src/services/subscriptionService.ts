@@ -13,6 +13,8 @@ export interface Subscription {
   updated_at: string;
   billing_period_text?: string;
   billing_period_accurate?: boolean;
+    cancel_at_period_end?: boolean; // ✅ add this line
+
 }
 
 export interface PlanFeatures {

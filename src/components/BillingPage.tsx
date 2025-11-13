@@ -16,6 +16,9 @@ import {
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
 
+import { supabase } from '../lib/supabase';
+
+
 const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY || '');
 
 interface PaymentMethod {
@@ -38,6 +41,8 @@ interface Invoice {
   invoice_pdf?: string;
   period_start: number;
   period_end: number;
+  // **ADD THIS FIELD:**
+  db_id?: string; // The UUID required by the download function
 }
 
 const AddPaymentMethodForm: React.FC<{
@@ -176,66 +181,79 @@ const BillingPage: React.FC = () => {
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<string>('');
   const [resubscribeLoading, setResubscribeLoading] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
-  
+  const [downloadingInvoice, setDownloadingInvoice] = useState<string | null>(null);
+
   const { user, session } = useAuth();
   const navigate = useNavigate();
 
-  const loadBillingData = async () => {
-    if (!user) return;
+ const loadBillingData = async () => {
+  if (!user) return;
 
-    try {
-      setLoading(true);
-      setError('');
+  try {
+    setLoading(true);
+    setError('');
 
-      console.log('💳 Loading billing data for user:', user.id);
+    console.log('💳 Loading billing data for user:', user.id);
 
-      // Load subscription data
-      const subscriptionData = await SubscriptionService.checkSubscriptionAccess(user.id);
-      console.log('📊 Subscription data:', subscriptionData);
-      setSubscription(subscriptionData);
+    // Load subscription data
+    const subscriptionData = await SubscriptionService.checkSubscriptionAccess(user.id);
+    console.log('📊 Subscription data:', subscriptionData);
+    setSubscription(subscriptionData);
 
-      // Load payment methods if we have a Stripe customer
-      if (subscriptionData?.subscription?.stripe_customer_id) {
-        console.log('💳 Loading payment methods for customer:', subscriptionData.subscription.stripe_customer_id);
-        await loadPaymentMethods(subscriptionData.subscription.stripe_customer_id);
-        
-        // Create mock invoice based on subscription
-        const planAmounts: Record<string, number> = {
-          monthly: 299,
-          semiannual: 999,
-          annual: 1999,
-          trial: 0
-        };
-
-        const amount = planAmounts[subscriptionData.subscription.plan_type] || 0;
-        
-        if (amount > 0) {
-          setInvoices([
-            {
-              id: `in_${subscriptionData.subscription.id.slice(-10)}`,
-              amount,
-              status: 'paid',
-              created: Math.floor(new Date(subscriptionData.subscription.current_period_start).getTime() / 1000),
-              period_start: Math.floor(new Date(subscriptionData.subscription.current_period_start).getTime() / 1000),
-              period_end: Math.floor(new Date(subscriptionData.subscription.current_period_end).getTime() / 1000)
-            }
-          ]);
-        } else {
-          setInvoices([]);
-        }
-      } else {
-        console.log('💳 No Stripe customer ID found');
-        setPaymentMethods([]);
-        setInvoices([]);
-      }
-
-    } catch (err: any) {
-      console.error('❌ Error loading billing data:', err);
-      setError('Failed to load billing information');
-    } finally {
-      setLoading(false);
+    // Load payment methods if we have a Stripe customer
+    if (subscriptionData?.subscription?.stripe_customer_id) {
+      console.log('💳 Loading payment methods for customer:', subscriptionData.subscription.stripe_customer_id);
+      await loadPaymentMethods(subscriptionData.subscription.stripe_customer_id);
     }
-  };
+
+    // ✅ NEW: Fetch actual invoices from Supabase
+    console.log('🧾 Fetching invoices from Supabase...');
+    const { data: invoicesData, error: invoicesError } = await supabase
+      .from('invoices')
+      .select('*')
+      .eq('user_id', user.id) // or whatever foreign key links the invoice to the user
+      .order('created_at', { ascending: false });
+
+    // BillingPage.tsx (NEW, CORRECTED BLOCK)
+
+    if (invoicesError) {
+      console.error('❌ Failed to fetch invoices:', invoicesError);
+      setInvoices([]);
+    } else {
+      console.log('✅ Invoices loaded:', invoicesData);
+      
+      // *** FIX: Map and format data from DB columns to the Invoice interface ***
+      const mappedInvoices = (invoicesData || []).map((invoice: any) => ({
+        id: invoice.stripe_invoice_id || invoice.id, // Use Stripe ID if available, otherwise use DB ID
+        
+        // **FIX 1: Amount** - Use 'total' from DB and ensure it's a number
+        amount: parseFloat(invoice.total || 0), 
+        
+        status: invoice.status,
+        
+        // **FIX 2: Dates** - Map the correct DB columns (which are strings)
+        // We will use the new safe formatDate function to handle these strings
+        created: invoice.invoice_date,         // DB column 'invoice_date' maps to 'created'
+        period_start: invoice.period_start,    // DB column 'period_start' maps to 'period_start'
+        period_end: invoice.period_end,        // DB column 'period_end' maps to 'period_end'
+        
+        // Required for the download function
+        db_id: invoice.id, 
+        invoice_pdf: invoice.invoice_pdf,
+      }));
+      
+      setInvoices(mappedInvoices);
+      // *** END OF FIX ***
+    }
+
+  } catch (err: any) {
+    console.error('❌ Error loading billing data:', err);
+    setError('Failed to load billing information');
+  } finally {
+    setLoading(false);
+  }
+};
+
 
   const loadPaymentMethods = async (customerId: string) => {
     try {
@@ -438,13 +456,75 @@ const BillingPage: React.FC = () => {
     }
   };
 
-  const formatDate = (timestamp: number) => {
-    return new Date(timestamp * 1000).toLocaleDateString('en-US', {
+  const handleDownloadInvoice = async (invoice: Invoice) => {
+    try {
+      setDownloadingInvoice(invoice.id);
+      setError('');
+
+      console.log('Downloading invoice:', invoice.id);
+
+      const invoiceUUID = invoice.db_id || invoice.id; // fallback to Stripe ID if db_id missing
+const downloadUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/download-receipt/${invoiceUUID}`;
+
+
+      const response = await fetch(downloadUrl, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${session?.access_token || import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+        }
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Download failed:', response.status, errorText);
+        throw new Error(`Failed to download invoice. Server status: ${response.status}`);
+      }
+
+      const blob = await response.blob();
+
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `Receipt-${invoice.id}.pdf`);
+      document.body.appendChild(link);
+      link.click();
+
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+
+      console.log('Invoice downloaded successfully');
+    } catch (err: any) {
+      console.error('Download error:', err);
+      setError(err.message || 'Failed to download receipt. Please try again.');
+    } finally {
+      setDownloadingInvoice(null);
+    }
+  };
+
+  // NEW, safer code for formatDate
+
+const formatDate = (timestampOrString: number | string) => {
+    let date;
+    
+    // Check if it's a number (Unix timestamp in seconds)
+    if (typeof timestampOrString === 'number') {
+        date = new Date(timestampOrString * 1000); 
+    } else {
+        // Assume it's a date string (like '2024-01-01T00:00:00Z')
+        date = new Date(timestampOrString); 
+    }
+    
+    // Safety check: if the date is invalid, return a default string
+    if (isNaN(date.getTime())) {
+      return 'N/A';
+    }
+
+    return date.toLocaleDateString('en-US', {
       year: 'numeric',
       month: 'short',
       day: 'numeric'
     });
-  };
+};
 
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat('en-US', {
@@ -893,8 +973,17 @@ const getPlanDurationText = (planType: string) => {
                       {formatDate(invoice.period_start)} - {formatDate(invoice.period_end)}
                     </td>
                     <td className="py-3 px-4 text-right">
-                      <button className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition-colors">
-                        <Download className="h-4 w-4" />
+                      <button
+                        onClick={() => handleDownloadInvoice(invoice)}
+                        disabled={downloadingInvoice === invoice.id}
+                        className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Download Receipt"
+                      >
+                        {downloadingInvoice === invoice.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Download className="h-4 w-4" />
+                        )}
                       </button>
                     </td>
                   </tr>
