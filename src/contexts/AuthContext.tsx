@@ -105,7 +105,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const handleSubscriptionUpdate = () => {
       if (user) {
         setTimeout(() => {
-          SubscriptionService.createSubscription(user.id, 'refresh')
+          // ❌ BEFORE: Incorrectly calling createSubscription with 'refresh'
+          // SubscriptionService.createSubscription(user.id, 'refresh')
+          
+          // ✅ AFTER: Correctly calling the function to fetch the latest subscription status
+          SubscriptionService.getUserSubscription(user.id) 
             .catch(console.warn);
         }, 1000);
       }

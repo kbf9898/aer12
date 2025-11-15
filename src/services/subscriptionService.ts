@@ -13,7 +13,7 @@ export interface Subscription {
   updated_at: string;
   billing_period_text?: string;
   billing_period_accurate?: boolean;
-    cancel_at_period_end?: boolean; // ✅ add this line
+  cancel_at_period_end?: boolean; // ✅ add this line
 
 }
 
@@ -67,6 +67,8 @@ export class SubscriptionService {
 
       if (rpcError) {
         console.error('❌ RPC Error:', rpcError);
+        // The error here is likely a DB function constraint violation or bad data,
+        // which the console log confirms is an "Invalid plan type: refresh" error.
         throw new Error(`Failed to create subscription: ${rpcError.message}`);
       }
 
@@ -90,7 +92,7 @@ export class SubscriptionService {
       }
 
       console.log('✅ Subscription created/updated:', subscriptionData);
-      return subscriptionData;
+      return subscriptionData as Subscription;
     } catch (error: any) {
       console.error('Error creating subscription:', error);
       throw error;
@@ -111,6 +113,7 @@ export class SubscriptionService {
         .single();
 
       if (fetchError) throw new Error(`Failed to fetch current subscription: ${fetchError.message}`);
+      if (!currentSub) throw new Error('Current subscription not found for update.');
 
       const { data: rpcResult, error: rpcError } = await supabase.rpc('handle_subscription_webhook', {
         p_user_id: currentSub.user_id,
@@ -124,14 +127,17 @@ export class SubscriptionService {
 
       if (rpcError) throw new Error(`Failed to update subscription: ${rpcError.message}`);
 
+      // ✅ Ensure the updated subscription is fetched and type-casted correctly
       const { data: updatedSub, error: fetchUpdatedError } = await supabase
         .from('subscriptions')
-        .select()
+        .select('*') // Select all columns
         .eq('id', subscriptionId)
         .single();
 
-      if (fetchUpdatedError) throw fetchUpdatedError;
-      return updatedSub;
+      if (fetchUpdatedError) throw new Error(`Failed to fetch updated subscription: ${fetchUpdatedError.message}`);
+      if (!updatedSub) throw new Error('Updated subscription not found after RPC.');
+      
+      return updatedSub as Subscription;
     } catch (error: any) {
       console.error('Error updating subscription:', error);
       throw error;
@@ -140,7 +146,8 @@ export class SubscriptionService {
 static async getUserSubscription(userId: string): Promise<Subscription | null> {
   try {
     // Use direct query instead of RPC to avoid type mismatch issues
-    const { data: fallbackData, error: fallbackError } = await supabase
+    // Added 'as Subscription | null' to the return to satisfy the Promise type
+    const { data: subscriptionData, error: fetchError } = await supabase
       .from('subscriptions')
       .select(`
   *,
@@ -153,16 +160,16 @@ static async getUserSubscription(userId: string): Promise<Subscription | null> {
       .order('created_at', { ascending: false })
       .maybeSingle();
     
-    if (fallbackError) {
-      console.error('Error fetching subscription:', fallbackError);
+    if (fetchError) {
+      console.error('Error fetching subscription:', fetchError);
       return null;
     }
 
     // 🔎 Log subscription data before returning
-    if (fallbackData) {
-      console.log("Fetched subscription:", fallbackData);
+    if (subscriptionData) {
+      console.log("Fetched subscription:", subscriptionData);
     }
-    return fallbackData;
+    return subscriptionData as Subscription | null;
   } catch (error: any) {
     console.error('Error fetching user subscription:', error);
     return null;
@@ -337,7 +344,7 @@ static async getUserSubscription(userId: string): Promise<Subscription | null> {
         ...sub,
         user_email: 'Unknown',
         restaurant_name: 'Unknown Restaurant'
-      }));
+      })) as (Subscription & { user_email?: string; restaurant_name?: string; })[]; // Cast for safety
     }
   }
 

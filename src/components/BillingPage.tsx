@@ -214,6 +214,11 @@ const BillingPage: React.FC = () => {
       .eq('user_id', user.id) // or whatever foreign key links the invoice to the user
       .order('created_at', { ascending: false });
 
+      // 💡 ADD THIS NEW DEBUG LINE:
+    console.log('⚠️ DEBUG: Invoices Data Result:', invoicesData); 
+    console.log('⚠️ DEBUG: Invoices Error Result:', invoicesError); 
+    console.log('⚠️ DEBUG: User ID being used:', user.id);
+
     // BillingPage.tsx (NEW, CORRECTED BLOCK)
 
     if (invoicesError) {
